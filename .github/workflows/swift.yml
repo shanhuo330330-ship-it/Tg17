@@ -2,77 +2,56 @@ name: Build iOS App
 
 on:
   push:
-    branches: [ main, master, "**" ]
+    branches: ["**"]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Auto-extract any zip in repo root
+      - name: Prepare project
+        id: prep
         run: |
+          set -e
           shopt -s nullglob
-          for z in *.zip; do
-            echo "发现压缩包: $z，正在解压..."
-            unzip -o "$z" -d "_extracted_$(basename "$z" .zip)"
-          done
-          find . -maxdepth 3 -not -path "*/.git/*" | sort
-
-      - name: Fix Swift concurrency issues in ProxyTester.swift
-        run: |
-          # Find ProxyTester.swift file
-          PROXY_TESTER=$(find . -name "ProxyTester.swift" -not -path "*/.git/*" | head -1)
-          if [ -n "$PROXY_TESTER" ]; then
-            echo "Found ProxyTester.swift: $PROXY_TESTER"
-            # Replace the concurrent mutations of 'finished' variable
-            sed -i '' 's/finished = true/await MainActor.run { finished = true }/g' "$PROXY_TESTER"
-            echo "Fixed ProxyTester.swift concurrency issues"
-          fi
-
-      - name: Locate the .xcodeproj
-        id: locate
-        run: |
-          PROJECT_PATH=$(find . -name "*.xcodeproj" -not -path "*/.git/*" | head -1)
-          if [ -z "$PROJECT_PATH" ]; then
-            echo "::error::找不到 .xcodeproj，请确认项目已上传（可以在压缩包里）。"
+          for z in *.zip; do unzip -oq "$z" -d "_x_$(basename "$z" .zip)"; done
+          PROJECT=$(find . -name "*.xcodeproj" -not -path "*/.git/*" | head -1)
+          if [ -z "$PROJECT" ]; then
+            echo "::error::找不到 .xcodeproj，确认压缩包或工程文件已上传"
             exit 1
           fi
-          SCHEME=$(basename "$PROJECT_PATH" .xcodeproj)
-          echo "project_path=$PROJECT_PATH" >> "$GITHUB_OUTPUT"
-          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+          if xcodebuild -list -project "$PROJECT" 2>/dev/null | grep -q "Schemes:"; then
+            MODE=$(xcodebuild -list -project "$PROJECT" | awk '/Schemes:/{f=1;next} f&&NF{print "-scheme "$1; exit}')
+          else
+            MODE=$(xcodebuild -list -project "$PROJECT" | awk '/Targets:/{f=1;next} f&&NF{print "-target "$1; exit}')
+          fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "工程: $PROJECT / 编译方式: $MODE"
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app || true
-
-      - name: Build for iOS Simulator
+      - name: Build simulator
         run: |
-          xcodebuild -project "${{ steps.locate.outputs.project_path }}" \
-            -scheme "${{ steps.locate.outputs.scheme }}" \
-            -sdk iphonesimulator -configuration Release \
-            -derivedDataPath build/sim CODE_SIGNING_ALLOWED=NO build | tail -40
+          set -o pipefail
+          xcodebuild -project "${{ steps.prep.outputs.project }}" ${{ steps.prep.outputs.mode }} -sdk iphonesimulator -configuration Release -derivedDataPath build/sim CODE_SIGNING_ALLOWED=NO build 2>&1 | tail -60
 
-      - name: Build for iOS Device (unsigned)
+      - name: Build device
         run: |
-          xcodebuild -project "${{ steps.locate.outputs.project_path }}" \
-            -scheme "${{ steps.locate.outputs.scheme }}" \
-            -destination 'generic/platform=iOS' -configuration Release \
-            -derivedDataPath build/device \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build | tail -40
+          set -o pipefail
+          xcodebuild -project "${{ steps.prep.outputs.project }}" ${{ steps.prep.outputs.mode }} -sdk iphoneos -configuration Release -derivedDataPath build/device CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build 2>&1 | tail -60
 
-      - name: Pack unsigned .ipa
+      - name: Pack ipa
         run: |
-          APP_PATH=$(find build/device -name "*.app" -maxdepth 5 | head -1)
-          SIM_APP_PATH=$(find build/sim -name "*.app" -maxdepth 5 | head -1)
+          set -e
+          APP=$(find build/device -name "*.app" | head -1)
+          SAPP=$(find build/sim -name "*.app" | head -1)
           mkdir -p Payload
-          cp -r "$APP_PATH" Payload/
-          zip -r ProxyProfileDemo-unsigned.ipa Payload
-          zip -r ProxyProfileDemo-simulator-app.zip "$SIM_APP_PATH"
+          cp -R "$APP" Payload/
+          zip -qr ProxyProfileDemo-unsigned.ipa Payload
+          zip -qr ProxyProfileDemo-simulator-app.zip "$SAPP"
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: ProxyProfileDemo-iOS
           path: |
