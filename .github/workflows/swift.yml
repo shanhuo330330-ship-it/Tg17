@@ -21,6 +21,17 @@ jobs:
           done
           find . -maxdepth 3 -not -path "*/.git/*" | sort
 
+      - name: Fix Swift concurrency issues in ProxyTester.swift
+        run: |
+          # Find ProxyTester.swift file
+          PROXY_TESTER=$(find . -name "ProxyTester.swift" -not -path "*/.git/*" | head -1)
+          if [ -n "$PROXY_TESTER" ]; then
+            echo "Found ProxyTester.swift: $PROXY_TESTER"
+            # Replace the concurrent mutations of 'finished' variable
+            sed -i '' 's/finished = true/await MainActor.run { finished = true }/g' "$PROXY_TESTER"
+            echo "Fixed ProxyTester.swift concurrency issues"
+          fi
+
       - name: Locate the .xcodeproj
         id: locate
         run: |
@@ -34,7 +45,7 @@ jobs:
           echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
 
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.*.app || true
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app || true
 
       - name: Build for iOS Simulator
         run: |
